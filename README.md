@@ -1,7 +1,7 @@
 # EmoSense
 EmoSense is a transformer-based NLP model to classify emotions in English text.
 
-# GoEmotions → 8-Class Emotion Classifier (DistilBERT)
+## GoEmotions → 8-Class Emotion Classifier (DistilBERT)
 
 This project fine-tunes **DistilBERT** on the **GoEmotions (simplified)** dataset to build an **8-class emotion classifier**. It maps the original GoEmotions labels into 8 broader categories and trains a weighted cross-entropy model to handle class imbalance.
 
