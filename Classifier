@@ -1,0 +1,197 @@
+# install dependencies
+!pip install torch torchvision torchaudio
+!pip install transformers datasets evaluate
+
+# import libraries
+import torch
+from datasets import load_dataset
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from transformers import TrainingArguments, Trainer
+from sklearn.utils.class_weight import compute_class_weight
+import evaluate
+import numpy as np
+import gc
+from collections import Counter
+from torch import nn
+from transformers import Trainer
+
+# load dataset
+dataset_original = load_dataset("go_emotions", "simplified")
+label_names = dataset_original["train"].features["labels"].feature.names
+
+#check dataset
+print(dataset_original)
+print(dataset_original["train"][0])
+
+# Simplified label mapping for GoEmotions
+simplified_map = {
+    # anger
+    "anger": 0, "annoyance": 0, "confusion": 0, "disapproval": 0,
+
+    # disgust
+    "disgust": 1,
+
+    # fear
+    "fear": 2, "nervousness": 2, "embarrassment": 2,
+
+    # joy
+    "joy": 3, "amusement": 3, "approval": 3, "excitement": 3,
+    "gratitude": 3, "optimism": 3, "relief": 3, "pride": 3, "realization": 3,
+
+    # sadness
+    "sadness": 4, "disappointment": 4, "grief": 4, "remorse": 4,
+
+    # surprise
+    "surprise": 5, "curiosity": 5,
+
+    # neutral
+    "neutral": 6, "desire": 6, "caring": 6, "admiration": 6,
+
+    #love
+    "love": 7
+}
+
+# map original label to simplified label
+def map_to_simplified(example):
+    original_label_index = example['labels'][0]
+    original_label_name = label_names[original_label_index]
+    example['labels'] = [simplified_map[original_label_name]]
+    return example
+
+dataset_simplified = dataset_original.map(map_to_simplified)
+print(dataset_simplified['train']['labels'][:10])
+
+# CHECK THE DISTRIBUTION
+label_counts = Counter([label[0] for label in dataset_simplified['train']['labels']])
+print("\nLabel distribution after mapping:", label_counts)
+
+# Detailed breakdown
+labels_list = ["anger", "disgust", "fear", "joy", "sadness", "surprise", "neutral", "love"]
+print("\nDetailed distribution:")
+for i in range(8):
+    count = label_counts.get(i, 0)
+    print(f"  {labels_list[i]}: {count} examples")
+
+# Calculate class weights to handle imbalance
+train_labels = [label[0] for label in dataset_simplified['train']['labels']]
+class_weights = compute_class_weight(
+    'balanced',
+    classes=np.unique(train_labels),
+    y=train_labels
+)
+class_weights = torch.tensor(class_weights, dtype=torch.float)
+
+print("Class weights:", class_weights)
+
+#Tokenize text
+
+tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+
+def tokenize_function(example):
+    return tokenizer(example["text"], padding="max_length", truncation=True)
+
+tokenized_dataset = dataset_simplified.map(tokenize_function, batched=True)
+
+# Set format for PyTorch
+tokenized_dataset = tokenized_dataset.rename_column("labels", "label")
+tokenized_dataset.set_format("torch", columns=["input_ids", "attention_mask", "label"])
+
+train_dataset = tokenized_dataset["train"]
+test_dataset = tokenized_dataset["test"]
+
+# Load pretrained model
+
+# Hardcode the number of labels
+num_labels = 8
+
+# Hardcode the emotion names (in the right order!)
+labels = ["anger", "disgust", "fear", "joy", "sadness", "surprise", "neutral", "love"]
+
+# Create mappings
+id2label = {i: label for i, label in enumerate(labels)}
+label2id = {label: i for i, label in enumerate(labels)}
+
+# Load model with mappings
+model = AutoModelForSequenceClassification.from_pretrained(
+    "distilbert-base-uncased",
+    num_labels=num_labels,
+    id2label=id2label,
+    label2id=label2id
+)
+
+# Quick check
+print(model.config.id2label)
+
+# define metrics
+
+accuracy = evaluate.load("accuracy")
+f1 = evaluate.load("f1")
+
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    predictions = np.argmax(logits, axis=-1)
+    acc = accuracy.compute(predictions=predictions, references=labels)
+    f1_score = f1.compute(predictions=predictions, references=labels, average="macro")
+    return {"accuracy": acc["accuracy"], "f1": f1_score["f1"]}
+
+from torch import nn
+from transformers import Trainer
+
+class WeightedTrainer(Trainer):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        labels = inputs.get("labels")
+        outputs = model(**inputs)
+        logits = outputs.get("logits")
+
+        # Use your calculated class weights
+        loss_fct = nn.CrossEntropyLoss(weight=class_weights.to(model.device))
+        loss = loss_fct(logits.view(-1, self.model.config.num_labels), labels.view(-1))
+
+        return (loss, outputs) if return_outputs else loss
+
+# Training setup
+
+training_args = TrainingArguments(
+    output_dir="/content/drive/MyDrive/emotion_model",
+    eval_strategy="steps",
+    eval_steps=1000,
+    save_strategy="steps", # Explicitly set save strategy
+    save_steps=1000, # Make save_steps a multiple of eval_steps
+    save_total_limit=20,
+    lr_scheduler_type="cosine",
+    warmup_ratio=0.1,
+    per_device_train_batch_size=16,
+    per_device_eval_batch_size=32,
+    num_train_epochs=8,
+    weight_decay=0.01,
+    logging_dir="/content/drive/MyDrive/emotion_model/logs",
+    logging_steps=200,  # Log more frequently
+    load_best_model_at_end=True,
+    metric_for_best_model="eval_f1",  # Use accuracy to select best model
+)
+
+trainer = WeightedTrainer(
+    model=model,
+    args=training_args,
+    train_dataset=train_dataset,
+    eval_dataset=test_dataset,
+    tokenizer=tokenizer,
+    compute_metrics=compute_metrics,
+)
+
+# Clear GPU memory before starting
+torch.cuda.empty_cache()
+gc.collect()
+
+print("Memory cleared - starting training...")
+
+# train model
+trainer.train()
+
+# Evaluate
+results = trainer.evaluate()
+print(results)
+
+# Save model
+trainer.save_model("emotion_model")
+tokenizer.save_pretrained("emotion_model")
