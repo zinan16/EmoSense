@@ -1,4 +1,4 @@
-### EmoSense
+# EmoSense
 EmoSense is a transformer-based NLP model to classify emotions in English text.
 
 # GoEmotions → 8-Class Emotion Classifier (DistilBERT)
